@@ -6,7 +6,7 @@
 #include "GPS_Air530.h"
 #include "GPS_Air530Z.h"
 #include "HT_SSD1306Wire.h"
-#include <math.h>
+#include "qrcode.h"
 
 Air530Class GPS;
 extern SSD1306Wire display;
@@ -336,6 +336,43 @@ static void prepareTxFrame()
 #endif
 }
 
+void displayQR(String message)
+{
+  // Create the QR code
+  QRCode qrcode;
+  const int qrcodeVersion = 3;
+  const int pixelsPerSquare = 2;
+  const int ecc = 0;
+
+  uint8_t qrcodeData[qrcode_getBufferSize(qrcodeVersion)];
+  qrcode_initText(&qrcode, qrcodeData, qrcodeVersion, ecc, (const char *)message.c_str());
+
+  VextON(); // oled power on;
+  delay(10);
+  display.init();
+  display.clear();
+
+  for (uint8_t y = 0; y < qrcode.size; y++)
+  {
+    for (uint8_t x = 0; x < qrcode.size; x++)
+    {
+      // If pixel is on, we draw a ps x ps black square
+      if (qrcode_getModule(&qrcode, x, y))
+      {
+        for (int xi = x * pixelsPerSquare + 2; xi < x * pixelsPerSquare + pixelsPerSquare + 2; xi++)
+        {
+          for (int yi = y * pixelsPerSquare + 2; yi < y * pixelsPerSquare + pixelsPerSquare + 2; yi++)
+          {
+            display.setPixel(xi, yi);
+          }
+        }
+      }
+    }
+  }
+  display.display();
+  delay(15000);
+}
+
 void setup()
 {
   Serial.begin(115200);
@@ -344,9 +381,12 @@ void setup()
   enableAt();
 #endif
   LoRaWAN.displayMcuInit();
+
   deviceState = DEVICE_STATE_INIT;
   LoRaWAN.ifskipjoin();
 }
+
+bool qrShown = false;
 
 void loop()
 {
@@ -356,6 +396,15 @@ void loop()
   {
 #if (LORAWAN_DEVEUI_AUTO)
     LoRaWAN.generateDeveuiByChipID();
+    if (!qrShown)
+    {
+      String qrURL = "https://bit.ly/3MGU39B/?dev=";
+      char devEUIasText[17];
+      sprintf(devEUIasText, "%02x%02x%02x%02x%02x%02x%02x%02x", devEui[0], devEui[1], devEui[2], devEui[3], devEui[4], devEui[5], devEui[6], devEui[7]);
+      Serial.println(devEUIasText);
+      displayQR(qrURL + devEUIasText);
+      qrShown = true;
+    }
 #endif
 #if (AT_SUPPORT)
     getDevParam();
