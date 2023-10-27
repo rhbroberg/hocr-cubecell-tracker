@@ -11,11 +11,11 @@
 Air530Class GPS;
 extern SSD1306Wire display;
 
+#define LPP_GPS_LAT_LON_MULT 100000
+
 // when gps waked, if in GPS_UPDATE_TIMEOUT, gps not fixed then into low power mode
 #define GPS_UPDATE_TIMEOUT 60000
 
-// once fixed, GPS_CONTINUE_TIME later into low power mode
-#define GPS_CONTINUE_TIME 1000
 /*
    set LoraWan_RGB to Active,the RGB active in loraWan
    RGB red means sending;
@@ -62,7 +62,7 @@ bool keepNet = LORAWAN_NET_RESERVE;
 bool isTxConfirmed = LORAWAN_UPLINKMODE;
 
 /* Application port */
-uint8_t appPort = 2;
+uint8_t appPort = 0;
 /*!
   Number of trials to transmit the frame, if the LoRaMAC layer did not
   receive an acknowledgment. The MAC performs a datarate adaptation,
@@ -101,8 +101,12 @@ void VextOFF(void) // Vext default OFF
   pinMode(Vext, OUTPUT);
   digitalWrite(Vext, HIGH);
 }
-void displayGPSInof()
+
+void displayGPSInfo()
 {
+#ifdef DISPLAY_ON
+  return;
+#endif
   char str[30];
   display.clear();
   display.setFont(ArialMT_Plain_10);
@@ -146,7 +150,7 @@ void displayGPSInof()
   display.display();
 }
 
-void printGPSInof()
+void printGPSInfo()
 {
   Serial.print("Date/Time: ");
   if (GPS.date.isValid())
@@ -168,29 +172,95 @@ void printGPSInof()
   }
   Serial.println();
 
-  Serial.print("LAT: ");
-  Serial.print(GPS.location.lat(), 6);
-  Serial.print(", LON: ");
-  Serial.print(GPS.location.lng(), 6);
-  Serial.print(", ALT: ");
-  Serial.print(GPS.altitude.meters());
-
-  Serial.println();
-
-  Serial.print("SATS: ");
-  Serial.print(GPS.satellites.value());
-  Serial.print(", HDOP: ");
-  Serial.print(GPS.hdop.hdop());
-  Serial.print(", AGE: ");
-  Serial.print(GPS.location.age());
-  Serial.print(", COURSE: ");
-  Serial.print(GPS.course.deg());
-  Serial.print(", SPEED: ");
-  Serial.println(GPS.speed.kmph());
-  Serial.println();
+  Serial.printf("SATS: %d ; ", GPS.satellites.value());
+  Serial.printf(", HDOP: %10.7f ; ", GPS.hdop.hdop());
+  Serial.printf(", LAT: %10.7f ; ", GPS.location.lat());
+  Serial.printf(", LON: %10.7f ;", GPS.location.lng());
+  Serial.printf(", AGE: %d ;", GPS.location.age());
+  Serial.printf(", ALT: %10.7f ;", GPS.altitude.meters());
+  Serial.printf(", COURSE: %10.7f ;", GPS.course.deg());
+  Serial.printf(", SPEED: %f\n", GPS.speed.kmph());
 }
 
-static void prepareTxFrame(uint8_t port)
+uint8_t
+encodeDegrees(uint8_t sendBuffer[], const uint8_t position, const float degrees)
+{
+  uint8_t offset = position;
+  // thanks, arduino, for not supporting Math.round(), but only trunc() (casting); I do it myself
+  int32_t scaled = (degrees + (degrees < 0 ? -0.000005 : 0.000005)) * LPP_GPS_LAT_LON_MULT;
+
+  sendBuffer[offset++] = scaled >> 16;
+  sendBuffer[offset++] = scaled >> 8;
+  sendBuffer[offset++] = scaled;
+
+  return offset;
+}
+
+bool waitForGPSFix()
+{
+  Serial.println("Waiting for GPS FIX ...");
+
+#ifdef DISPLAY_ON
+  VextON(); // oled power on;
+  delay(10);
+  display.init();
+  display.clear();
+
+  display.setTextAlignment(TEXT_ALIGN_CENTER);
+  display.setFont(ArialMT_Plain_16);
+  display.drawString(64, 32 - 16 / 2, "GPS Searching...");
+  display.drawString(80, 5, "start");
+  Serial.println("GPS Searching...");
+  display.display();
+#endif
+
+  GPS.begin();
+  GPS.setmode(MODE_GPS);
+
+  uint32_t start = millis();
+
+  while (((millis() - start) < GPS_UPDATE_TIMEOUT) && (GPS.location.age() > 1000))
+  {
+    while (GPS.available() > 0)
+    {
+      if (GPS.encode(GPS.read()))
+      {
+        if (GPS.location.isValid())
+        {
+          printGPSInfo();
+          displayGPSInfo();
+
+          if (GPS.location.age() > 1000)
+          {
+            break;
+          }
+        }
+      }
+    }
+    if (!GPS.location.isValid())
+    {
+// delay(1000);
+// #define GO_FASTER
+#ifdef GO_FASTER
+      char remaining[8];
+      sprintf(remaining, "%4d", (uint16_t)(GPS_UPDATE_TIMEOUT - (millis() - start)) / 1000);
+      display.clear();
+      display.display();
+      display.drawString(64, 32 - 16 / 2, "GPS Searching...");
+      display.drawString(80, 5, (String)GPS.location.age());
+      display.display();
+      Serial.print("visible satellites: ");
+      Serial.print(GPS.satellites.value());
+      Serial.print("; hdop: ");
+      Serial.println(GPS.hdop.hdop());
+#endif
+    }
+  }
+  Serial.printf("leaving waiting; age is %d\n", GPS.location.age());
+  return (GPS.location.isValid() && (GPS.location.age() < 1000));
+}
+
+static void prepareTxFrame()
 {
   /*appData size is LORAWAN_APP_DATA_MAX_SIZE which is defined in "commissioning.h".
     appDataSize max value is LORAWAN_APP_DATA_MAX_SIZE.
@@ -200,131 +270,70 @@ static void prepareTxFrame(uint8_t port)
     the max value for different DR can be found in MaxPayloadOfDatarateCN470 refer to DataratesCN470 and BandwidthsCN470 in "RegionCN470.h".
   */
 
-  float lat, lon, alt, course, speed, hdop, sats;
-
-  Serial.println("Waiting for GPS FIX ...");
-
-  VextON(); // oled power on;
-  delay(10);
-  display.init();
-  display.clear();
-
-  display.setTextAlignment(TEXT_ALIGN_CENTER);
-  display.setFont(ArialMT_Plain_16);
-  display.drawString(64, 32 - 16 / 2, "GPS Searching...");
-  Serial.println("GPS Searching...");
-  display.display();
-
-  GPS.begin();
-  GPS.setmode(MODE_GPS);
-
-  uint32_t start = millis();
-  while ((millis() - start) < GPS_UPDATE_TIMEOUT)
+  if (waitForGPSFix())
   {
-    while (GPS.available() > 0)
-    {
-      GPS.encode(GPS.read());
-    }
-    // gps fixed in a second
-    if (GPS.location.age() < 1000)
-    {
-      break;
-    }
-    delay(1000);
-    Serial.println(".");
-  }
+    float lat, lon, alt, course, speed, hdop, sats;
+    uint16_t batteryVoltage = getBatteryVoltage();
 
-  // if gps fixed,  GPS_CONTINUE_TIME later stop GPS into low power mode, and every 1 second update gps, print and display gps info
-  if (GPS.location.age() < 1000)
-  {
-#ifdef STUPID
-    start = millis();
-    uint32_t printinfo = 0;
-    while ((millis() - start) < GPS_CONTINUE_TIME)
-    {
-      while (GPS.available() > 0)
-      {
-        GPS.encode(GPS.read());
-      }
+    Serial.print("BatteryVoltage:");
+    Serial.println(batteryVoltage);
 
-      if ((millis() - start) > printinfo)
-      {
-        printinfo += 1000;
-        printGPSInof();
-        displayGPSInof();
-      }
-    }
+    lat = GPS.location.lat();
+    lon = GPS.location.lng();
+    alt = GPS.altitude.meters();
+    course = GPS.course.deg();
+    speed = GPS.speed.kmph();
+    sats = GPS.satellites.value();
+    hdop = GPS.hdop.hdop();
+
+    appDataSize = 0;
+    appDataSize = encodeDegrees(appData, appDataSize, lat);
+    appDataSize = encodeDegrees(appData, appDataSize, lon);
+    //  appData[appDataSize++] = (uint8_t)(batteryVoltage >> 8);
+    //  appData[appDataSize++] = (uint8_t)batteryVoltage;
+
+    Serial.print("sending bytes ");
+    Serial.println(appDataSize);
+
+// if position fixed, then let GPS sleep; otherwise, leave it on to keep searching
+// #define TOO_SLOW_TO_ACQURE
+#ifdef TOO_SLOW_TO_ACQURE
+    GPS.end();
 #else
-    printGPSInof();
-    displayGPSInof();
+    String cmd = "$PGKC051,0*36";
+    GPS.sendcmd(cmd);
 #endif
+
+    // port 2 is gps data
+    appPort = 2;
   }
   else
   {
+#ifdef DISPLAY_ON
     display.clear();
     display.setTextAlignment(TEXT_ALIGN_CENTER);
     display.setFont(ArialMT_Plain_16);
     display.drawString(64, 32 - 16 / 2, "No GPS signal");
     Serial.println("No GPS signal");
     display.display();
+
     delay(2000);
+#endif
+    // port 3 is failure
+    appPort = 3;
+    appDataSize = 0;
+    appData[appDataSize++] = (uint8_t)(GPS.satellites.value() >> 8);
+    appData[appDataSize++] = (uint8_t)(GPS.satellites.value());
+    uint16_t intHDOP = GPS.hdop.hdop();
+    appData[appDataSize++] = (uint8_t)(intHDOP >> 8);
+    appData[appDataSize++] = (uint8_t)(intHDOP);
   }
-  // GPS.end();
+#ifdef DISPLAY_ON
   display.clear();
   display.display();
   display.stop();
   VextOFF(); // oled power off
-
-  lat = GPS.location.lat();
-  lon = GPS.location.lng();
-  alt = GPS.altitude.meters();
-  course = GPS.course.deg();
-  speed = GPS.speed.kmph();
-  sats = GPS.satellites.value();
-  hdop = GPS.hdop.hdop();
-
-  uint16_t batteryVoltage = getBatteryVoltage();
-
-  unsigned char *puc;
-
-#define LPP_GPS_LAT_LON_MULT 100000
-  appDataSize = 0;
-  {
-    int _cursor = 0;
-    int32_t latitude = (lat + 0.00005) * LPP_GPS_LAT_LON_MULT;
-    int32_t longitude = (lon + 0.00005) * LPP_GPS_LAT_LON_MULT;
-
-    appData[_cursor++] = latitude >> 16;
-    appData[_cursor++] = latitude >> 8;
-    appData[_cursor++] = latitude;
-    appData[_cursor++] = longitude >> 16;
-    appData[_cursor++] = longitude >> 8;
-    appData[_cursor++] = longitude;
-    appDataSize = _cursor;
-  }
-  //  appData[appDataSize++] = (uint8_t)(batteryVoltage >> 8);
-  //  appData[appDataSize++] = (uint8_t)batteryVoltage;
-
-  Serial.print("sending bytes ");
-  Serial.println(appDataSize);
-  Serial.print("SATS: ");
-  Serial.print(GPS.satellites.value());
-  Serial.print(", HDOP: ");
-  Serial.print(GPS.hdop.hdop());
-  Serial.print(", LAT: ");
-  Serial.print(GPS.location.lat());
-  Serial.print(", LON: ");
-  Serial.print(GPS.location.lng());
-  Serial.print(", AGE: ");
-  Serial.print(GPS.location.age());
-  Serial.print(", ALT: ");
-  Serial.print(GPS.altitude.meters());
-  Serial.print(", COURSE: ");
-  Serial.print(GPS.course.deg());
-  Serial.print(", SPEED: ");
-  Serial.println(GPS.speed.kmph());
-  Serial.print(" BatteryVoltage:");
-  Serial.println(batteryVoltage);
+#endif
 }
 
 void setup()
@@ -364,7 +373,7 @@ void loop()
   }
   case DEVICE_STATE_SEND:
   {
-    prepareTxFrame(appPort);
+    prepareTxFrame();
     LoRaWAN.displaySending();
     LoRaWAN.send();
     deviceState = DEVICE_STATE_CYCLE;
